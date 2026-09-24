@@ -39,6 +39,37 @@ def test_solve_ok():
     assert len(body["record"]["expansions"]) == 2
 
 
+def test_zero_cost_cycle_audit_record():
+    """报告场景：四点零代价环，公开记录须可复算到 e00、e01、e07。"""
+    payload = {
+        "points": ["r", "a", "b", "c"],
+        "root": "r",
+        "channels": [
+            {"id": "e00", "from": "b", "to": "a", "cost": 0},
+            {"id": "e01", "from": "c", "to": "b", "cost": 0},
+            {"id": "e06", "from": "a", "to": "c", "cost": 0},
+            {"id": "e07", "from": "r", "to": "c", "cost": 0},
+        ],
+    }
+    r = client.post("/api/solve", json=payload)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["canonical_ids"] == ["e00", "e01", "e07"]
+    assert body["total_cost"] == 0
+    assert body["record"]["contractions"] == 0
+    # c 的同价最低入口与规范裁决必须随结果公开
+    crec = next(
+        c for c in body["record"]["levels"][0]["chosen"] if c["node"] == "c"
+    )
+    assert crec["channel"] == "e07"
+    assert crec["reason"] == "canonical_ruling"
+    assert {x["channel"] for x in crec["candidates"]} == {"e06", "e07"}
+    rulings = {x["channel"]: x["decision"] for x in body["record"]["rulings"]}
+    assert rulings == {"e00": "accepted", "e01": "accepted",
+                       "e06": "rejected", "e07": "accepted"}
+
+
 def test_solve_unsolvable():
     payload = {
         "points": ["r", "a", "z"],

@@ -12,7 +12,7 @@ const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 /** 由记录条目生成图上的高亮集合。 */
 function highlightOf(item, pointSet) {
   const empty = { channelIds: new Set(), nodeIds: new Set(), removedIds: new Set(), kind: null };
-  if (!item) return empty;
+  if (!item || item.kind === "rulings") return empty;
   const channelIds = new Set();
   const nodeIds = new Set();
   const removedIds = new Set();
@@ -39,6 +39,12 @@ function highlightOf(item, pointSet) {
   return { channelIds, nodeIds, removedIds, kind: "expansion" };
 }
 
+const REASON_BADGE = {
+  unique: (d, c) => `第 ${d} 层唯一最低入口（代价 ${c.cost}）`,
+  canonical_ruling: (d) => `第 ${d} 层同价候选经规范裁决定夺`,
+  tie_break_id: (d) => `第 ${d} 层同价同惩罚取最小标识`,
+};
+
 /** 为每条最终树边汇总其在记录中的证据标签。 */
 function buildEvidence(record) {
   const m = new Map();
@@ -47,8 +53,11 @@ function buildEvidence(record) {
     m.get(id).push({ kind, text });
   };
   for (const lv of record.levels) {
-    if (lv.depth === 0) {
-      for (const c of lv.chosen) add(c.channel, "pick", "第 0 层最低入口");
+    for (const c of lv.chosen) {
+      // 同一条原始通道可能在多个收缩层作为选中边出现；只在最浅首次层给出定夺标签。
+      if (m.has(c.channel)) continue;
+      const text = (REASON_BADGE[c.reason] || REASON_BADGE.unique)(lv.depth, c);
+      add(c.channel, c.reason === "unique" ? "pick" : "rule", text);
     }
   }
   for (const e of record.expansions) {
@@ -168,7 +177,7 @@ export default function App() {
         <h1>冰川洞穴染料示踪 · 全局最小汇流树</h1>
         <p className="subtitle">
           逐点选择最低入口可能闭合成局部循环；系统以 Chu–Liu/Edmonds 全局汇流树
-          精确最小化总代价，并给出环收缩与展开替换的可复算记录。
+          精确最小化总代价，并给出同价规范裁决、环收缩与展开替换的逐层可复算记录。
         </p>
       </header>
 

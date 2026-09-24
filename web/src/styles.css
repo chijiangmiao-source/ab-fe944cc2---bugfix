@@ -183,6 +183,7 @@ code {
 .badge-enter { border-color: var(--hl); color: var(--hl); }
 .badge-keep { border-color: var(--tree); color: var(--tree); }
 .badge-pick { color: var(--text); }
+.badge-rule { border-color: var(--tree); color: var(--tree); background: #16281f; }
 
 .record-panel h3 { margin-bottom: 12px; }
 .record-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
@@ -207,6 +208,13 @@ code {
 .tag-level { background: #20303f; color: #9cc8f0; }
 .tag-contract { background: #3a2e14; color: var(--hl); }
 .tag-expand { background: #14301f; color: var(--tree); }
+.tag-ruling { background: #2a1f38; color: #c9a8f0; }
 .rec-desc { font-size: 12.5px; }
 .rewire-list { margin: 6px 0 0; padding-left: 16px; color: var(--muted); font-size: 12px; }
 .rewire-list li { margin: 2px 0; }
+.cand-list { margin: 2px 0 4px; padding-left: 14px; list-style: circle; }
+.cand-pick { color: var(--tree); }
+.cand-skip { color: var(--muted); }
+.ruling-list { margin-top: 6px; }
+.ruling-ok strong { color: var(--tree); }
+.ruling-no strong { color: var(--bad, #e08a8a); }

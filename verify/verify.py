@@ -1,6 +1,7 @@
 """verify 一次性服务：对真实 API 与经 Web 反代的同一请求做样例核对 + HTTP 冒烟。
 
-样例覆盖：嵌套环收缩、平行通道、同优规范树字典序、不可达点；
+样例覆盖：嵌套环收缩、平行通道、同优规范树字典序、四点零代价环的
+同价规范裁决（公开候选 / 裁决 / 逐层可复算）、不可达点；
 另含输入错误（自环 / 结构非法）核对。全部断言通过则进程以 0 退出，
 任一失败立即以非零码退出。
 """
@@ -118,6 +119,22 @@ SCENARIOS = {
         "expect_cost": 3,
         "expect_contractions": 0,
     },
+    "zero_cycle": {
+        # 报告中的四点零代价环：c 的 e06/e07 同价，须凭公开规范裁决取 e07
+        "payload": {
+            "points": ["r", "a", "b", "c"],
+            "root": "r",
+            "channels": [
+                {"id": "e00", "from": "b", "to": "a", "cost": 0},
+                {"id": "e01", "from": "c", "to": "b", "cost": 0},
+                {"id": "e06", "from": "a", "to": "c", "cost": 0},
+                {"id": "e07", "from": "r", "to": "c", "cost": 0},
+            ],
+        },
+        "expect_ids": ["e00", "e01", "e07"],
+        "expect_cost": 0,
+        "expect_contractions": 0,
+    },
     "unreachable": {
         "payload": {
             "points": ["r", "a", "b", "z"],
@@ -148,6 +165,27 @@ def verify_ok_scenario(name: str, sc: dict) -> None:
           f"规范树标识序列 == {sc['expect_ids']}（实际 {body_api['canonical_ids']}）")
     check(body_api["record"]["contractions"] == sc["expect_contractions"],
           f"环收缩次数 == {sc['expect_contractions']}")
+    # 规范裁决须逐条覆盖全部通道，接受集恰为规范树
+    rulings = body_api["record"].get("rulings")
+    check(rulings is not None and len(rulings) == len(sc["payload"]["channels"]),
+          "规范裁决逐条覆盖全部通道")
+    if rulings:
+        check(
+            [r["channel"] for r in rulings]
+            == sorted(c["id"] for c in sc["payload"]["channels"]),
+            "规范裁决按标识升序排列",
+        )
+        accepted = {r["channel"] for r in rulings if r["decision"] == "accepted"}
+        check(accepted == set(body_api["canonical_ids"]),
+              "裁决接受集与最终规范树一致")
+        cstar = body_api["total_cost"]
+        check(
+            all(
+                (r["decision"] == "accepted") == (r["forced_cost"] == cstar)
+                for r in rulings
+            ),
+            f"每条裁决的结论与强制代价（C*={cstar}）一致",
+        )
     replayed = replay_record(
         sc["payload"]["points"], sc["payload"]["root"],
         channels_of(sc["payload"]), body_api["record"],
@@ -157,6 +195,23 @@ def verify_ok_scenario(name: str, sc: dict) -> None:
         c["cost"] for c in body_api["tree"] if c["id"] in set(body_api["canonical_ids"])
     )
     check(cost_sum == body_api["total_cost"], "逐边代价之和等于总代价")
+
+    if name == "zero_cycle":
+        # 关键审计点：c 的 e06/e07 同价，记录须公开候选与裁决依据
+        crec = next(
+            c for c in body_api["record"]["levels"][0]["chosen"] if c["node"] == "c"
+        )
+        cand = {x["channel"]: x for x in crec.get("candidates", [])}
+        check(set(cand) == {"e06", "e07"}, "c 的同价最低入口 e06、e07 全部公开")
+        check(
+            crec["channel"] == "e07" and crec["reason"] == "canonical_ruling",
+            "c 经规范裁决选入 e07（而非仅报告零次收缩）",
+        )
+        check(
+            cand.get("e07", {}).get("penalty") == 0
+            and cand.get("e06", {}).get("penalty") == 1,
+            "候选规范惩罚与裁决接受集一致（e07 接受=0，e06 拒绝=1）",
+        )
 
 
 def verify_unreachable_scenario() -> None:
@@ -218,7 +273,7 @@ def main() -> int:
         return 1
 
     print("== 真实 API 与页面结果核对 ==")
-    for name in ("nested", "parallel", "canonical"):
+    for name in ("nested", "parallel", "canonical", "zero_cycle"):
         verify_ok_scenario(name, SCENARIOS[name])
     verify_unreachable_scenario()
     verify_invalid_inputs()

@@ -1,4 +1,4 @@
-/** 内置样例：嵌套环、平行通道、同优规范树、不可达点。 */
+/** 内置样例：嵌套环、平行通道、同优规范树、零代价环裁决、不可达点。 */
 
 export const SAMPLES = {
   nested: {
@@ -34,6 +34,17 @@ k2, b, c, 1
 k3, r, c, 1
 k4, c, d, 1
 k5, r, d, 1`,
+  },
+  zeroCycle: {
+    name: "零代价环规范裁决",
+    points: "r a b c",
+    root: "r",
+    channels: `# b→a→c→b 零代价环，r→c 同价破环；c 的入口 e06/e07 同价，
+# 凭公开规范裁决取 e07，最终规范树 e00 e01 e07（无收缩）
+e00, b, a, 0
+e01, c, b, 0
+e06, a, c, 0
+e07, r, c, 0`,
   },
   unreachable: {
     name: "不可达点（无解）",

@@ -113,6 +113,22 @@ UNREACHABLE = (
     ),
 )
 
+# 报告中的四点零代价环：b→a、c→b、a→c 与 r→c，全部代价 0。
+ZERO_CYCLE = (
+    ["r", "a", "b", "c"],
+    "r",
+    make(
+        ["r", "a", "b", "c"],
+        "r",
+        [
+            ("e00", "b", "a", 0),
+            ("e01", "c", "b", 0),
+            ("e06", "a", "c", 0),
+            ("e07", "r", "c", 0),
+        ],
+    ),
+)
+
 
 class TestSamples:
     def test_nested_cycles(self):
@@ -163,6 +179,116 @@ class TestSamples:
         assert res["status"] == "unsolvable"
         assert res["unreachable"] == ["z"]
         assert res["reason"]
+
+
+class TestZeroCostCycleAudit:
+    """报告中的四点零代价环：公开记录必须能逐步推出 e00、e01、e07。"""
+
+    def test_canonical_tree_unchanged(self):
+        points, root, channels = ZERO_CYCLE
+        res = solve(points, root, channels)
+        assert res["status"] == "ok"
+        assert res["total_cost"] == 0
+        assert res["canonical_ids"] == ["e00", "e01", "e07"]
+        assert res["record"]["contractions"] == 0
+
+    def test_level0_records_tie_and_ruling_for_c(self):
+        points, root, channels = ZERO_CYCLE
+        res = solve(points, root, channels)
+        chosen = {c["node"]: c for c in res["record"]["levels"][0]["chosen"]}
+        # a、b 为唯一入口
+        assert chosen["a"]["channel"] == "e00" and chosen["a"]["reason"] == "unique"
+        assert chosen["b"]["channel"] == "e01" and chosen["b"]["reason"] == "unique"
+        assert "candidates" not in chosen["a"]
+        # c 的两个入口同价：公开全部候选及规范惩罚，裁决唯一指向 e07
+        crec = chosen["c"]
+        assert crec["channel"] == "e07"
+        assert crec["reason"] == "canonical_ruling"
+        by_ch = {x["channel"]: x for x in crec["candidates"]}
+        assert set(by_ch) == {"e06", "e07"}
+        assert all(x["cost"] == 0 for x in by_ch.values())
+        assert by_ch["e07"]["penalty"] == 0
+        assert by_ch["e06"]["penalty"] == 1
+
+    def test_rulings_cover_all_channels_and_match_tree(self):
+        points, root, channels = ZERO_CYCLE
+        res = solve(points, root, channels)
+        rulings = res["record"]["rulings"]
+        assert [r["channel"] for r in rulings] == ["e00", "e01", "e06", "e07"]
+        decision = {r["channel"]: r["decision"] for r in rulings}
+        assert {c for c, d in decision.items() if d == "accepted"} == {
+            "e00", "e01", "e07"
+        }
+        # 接受 ⇔ 强制代价仍为 C*=0；e06 强制后成环无解
+        for r in rulings:
+            if r["decision"] == "accepted":
+                assert r["forced_cost"] == 0
+            else:
+                assert r["forced_cost"] is None
+            assert r["basis"]
+
+    def test_record_replays_to_tree(self):
+        points, root, channels = ZERO_CYCLE
+        res = solve(points, root, channels)
+        assert replay_record(points, root, channels, res["record"]) == [
+            "e00", "e01", "e07"
+        ]
+
+
+class TestAuditRecord:
+    def test_rulings_self_consistent_on_all_samples(self):
+        for points, root, channels in (NESTED, PARALLEL, CANONICAL, ZERO_CYCLE):
+            res = solve(points, root, channels)
+            rec = res["record"]
+            by_id = {c.id: c for c in channels}
+            assert [r["channel"] for r in rec["rulings"]] == sorted(by_id)
+            accepted = {
+                r["channel"] for r in rec["rulings"] if r["decision"] == "accepted"
+            }
+            assert accepted == set(res["canonical_ids"])
+            assert replay_record(points, root, channels, rec) == res["canonical_ids"]
+
+    def test_nested_level_penalties_and_rewiring_published(self):
+        points, root, channels = NESTED
+        res = solve(points, root, channels)
+        levels = res["record"]["levels"]
+        # 收缩层进入边须同时公开代价分量与规范惩罚分量的修正
+        for lv in levels[:-1]:
+            cyc = lv["cycle"]
+            assert cyc["rewired_in"]
+            for r in cyc["rewired_in"]:
+                assert set(["level_cost", "adjusted_cost",
+                            "level_penalty", "adjusted_penalty"]).issubset(r)
+                assert r["adjusted_cost"] == r["level_cost"] - _entering_cost(
+                    levels, cyc, r
+                )
+
+    def test_tampered_record_rejected(self):
+        import copy
+
+        points, root, channels = ZERO_CYCLE
+        res = solve(points, root, channels)
+        # 伪造选入通道而不更新候选 / 裁决
+        bad = copy.deepcopy(res)
+        crec = next(
+            c for c in bad["record"]["levels"][0]["chosen"] if c["node"] == "c"
+        )
+        crec["channel"] = "e06"
+        with pytest.raises(AssertionError):
+            replay_record(points, root, channels, bad["record"])
+        # 删掉一条规范裁决
+        bad2 = copy.deepcopy(res)
+        bad2["record"]["rulings"] = [
+            r for r in bad2["record"]["rulings"] if r["channel"] != "e06"
+        ]
+        with pytest.raises(AssertionError):
+            replay_record(points, root, channels, bad2["record"])
+
+
+def _entering_cost(levels, cyc, rewired):
+    """从记录中取 rewired 边进入点在该层选入通道的有效代价。"""
+    lv = next(l for l in levels if l["cycle"] is cyc)
+    return next(c["cost"] for c in lv["chosen"] if c["node"] == rewired["enters"])
 
 
 class TestValidation:
