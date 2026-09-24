@@ -48,7 +48,7 @@ function buildEvidence(record) {
   };
   for (const lv of record.levels) {
     if (lv.depth === 0) {
-      for (const c of lv.chosen) add(c.channel, "pick", "第 0 层最低入口");
+      for (const c of lv.chosen) add(c.channel, "pick", "第 0 层最小键入口");
     }
   }
   for (const e of record.expansions) {
@@ -167,8 +167,9 @@ export default function App() {
       <header>
         <h1>冰川洞穴染料示踪 · 全局最小汇流树</h1>
         <p className="subtitle">
-          逐点选择最低入口可能闭合成局部循环；系统以 Chu–Liu/Edmonds 全局汇流树
-          精确最小化总代价，并给出环收缩与展开替换的可复算记录。
+          逐点贪心最低入口可能闭合成局部循环；系统以 Chu–Liu/Edmonds 全局汇流树
+          精确最小化总代价，同优树按升序标识字典序取规范解，并公开每步选择的
+          候选、比较键与规范裁决，使环收缩与展开记录可逐步复算。
         </p>
       </header>
 

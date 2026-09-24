@@ -210,3 +210,7 @@ code {
 .rec-desc { font-size: 12.5px; }
 .rewire-list { margin: 6px 0 0; padding-left: 16px; color: var(--muted); font-size: 12px; }
 .rewire-list li { margin: 2px 0; }
+.key-badge { font-size: 11px; color: var(--accent); }
+.canon-decisions { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
+.canon-decisions h4 { margin: 0 0 6px; font-size: 13px; }
+.record-panel .hint { color: var(--muted); font-size: 12px; margin: 4px 0 10px; }

@@ -118,6 +118,23 @@ SCENARIOS = {
         "expect_cost": 3,
         "expect_contractions": 0,
     },
+    # 同代价四点环：e06/e07 同价进 c，e06 标识更小但与 e00/e01 成环；
+    # 规范树取 e07，记录必须公开可逐步复算的选择依据。
+    "tie_cycle": {
+        "payload": {
+            "points": ["r", "a", "b", "c"],
+            "root": "r",
+            "channels": [
+                {"id": "e00", "from": "b", "to": "a", "cost": 0},
+                {"id": "e01", "from": "c", "to": "b", "cost": 0},
+                {"id": "e06", "from": "a", "to": "c", "cost": 0},
+                {"id": "e07", "from": "r", "to": "c", "cost": 0},
+            ],
+        },
+        "expect_ids": ["e00", "e01", "e07"],
+        "expect_cost": 0,
+        "expect_contractions": 0,
+    },
     "unreachable": {
         "payload": {
             "points": ["r", "a", "b", "z"],
@@ -148,6 +165,15 @@ def verify_ok_scenario(name: str, sc: dict) -> None:
           f"规范树标识序列 == {sc['expect_ids']}（实际 {body_api['canonical_ids']}）")
     check(body_api["record"]["contractions"] == sc["expect_contractions"],
           f"环收缩次数 == {sc['expect_contractions']}")
+    rec = body_api["record"]
+    check(bool(rec.get("key_scheme")), "记录公开逐层选择的比较规则")
+    check(all("candidates" in lv and "rule" in lv for lv in rec["levels"]),
+          "每个层级公开全部候选入边与选择规则")
+    decs = rec.get("canonical_decisions", [])
+    check([d["channel"] for d in decs] == sorted(d["channel"] for d in decs),
+          "规范裁决按通道标识升序公开")
+    check({d["channel"] for d in decs if d["accepted"]} == set(body_api["canonical_ids"]),
+          "被接受的强制通道集合恰为规范树")
     replayed = replay_record(
         sc["payload"]["points"], sc["payload"]["root"],
         channels_of(sc["payload"]), body_api["record"],
@@ -157,6 +183,36 @@ def verify_ok_scenario(name: str, sc: dict) -> None:
         c["cost"] for c in body_api["tree"] if c["id"] in set(body_api["canonical_ids"])
     )
     check(cost_sum == body_api["total_cost"], "逐边代价之和等于总代价")
+
+
+def verify_tie_cycle_ruling() -> None:
+    """同代价环 + 规范裁决：逐步核对公开记录与最终规范树一致。"""
+    print("- 样例 tie_cycle（同代价环 + 规范裁决）")
+    sc = SCENARIOS["tie_cycle"]
+    verify_ok_scenario("tie_cycle", sc)
+    st, body = http("POST", f"{API}/api/solve", sc["payload"])
+    if not (st == 200 and body.get("status") == "ok"):
+        return
+    rec = body["record"]
+    level0 = rec["levels"][0]
+    c_in = {
+        i["channel"]: i
+        for c in level0["candidates"]
+        if c["node"] == "c"
+        for i in c["inlets"]
+    }
+    check(set(c_in) == {"e06", "e07"}, "第 0 层公开 c 的全部候选 e06/e07")
+    check(c_in["e07"]["canonical"] and c_in["e07"]["selected"],
+          "e07 标记为规范优先且被选中")
+    check(not c_in["e06"]["canonical"] and not c_in["e06"]["selected"],
+          "e06 同价但非规范优先、落选")
+    check(c_in["e07"]["key"] < c_in["e06"]["key"],
+          "选中通道的比较键严格小于落选同价候选")
+    dec = {d["channel"]: d for d in rec["canonical_decisions"]}
+    check(dec["e06"]["accepted"] is False and dec["e06"]["min_cost_if_forced"] is None,
+          "规范裁决公开 e06 被弃原因（强制后与 e00/e01 成环不可行）")
+    check(dec["e07"]["accepted"] is True and dec["e07"]["min_cost_if_forced"] == 0,
+          "规范裁决公开 e07 被接受（强制后仍可达最优代价 0）")
 
 
 def verify_unreachable_scenario() -> None:
@@ -220,6 +276,7 @@ def main() -> int:
     print("== 真实 API 与页面结果核对 ==")
     for name in ("nested", "parallel", "canonical"):
         verify_ok_scenario(name, SCENARIOS[name])
+    verify_tie_cycle_ruling()
     verify_unreachable_scenario()
     verify_invalid_inputs()
     verify_http_smoke()

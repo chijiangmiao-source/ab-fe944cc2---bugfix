@@ -113,6 +113,23 @@ UNREACHABLE = (
     ),
 )
 
+# 同代价有向环 + 规范裁决：e06 与 e07 同价进 c，e06 标识更小但与 e00/e01 成环，
+# 规范树取 e07；记录必须公开足以逐步复算该选择的证据。
+TIE_CYCLE = (
+    ["r", "a", "b", "c"],
+    "r",
+    make(
+        ["r", "a", "b", "c"],
+        "r",
+        [
+            ("e00", "b", "a", 0),
+            ("e01", "c", "b", 0),
+            ("e06", "a", "c", 0),
+            ("e07", "r", "c", 0),
+        ],
+    ),
+)
+
 
 class TestSamples:
     def test_nested_cycles(self):
@@ -163,6 +180,56 @@ class TestSamples:
         assert res["status"] == "unsolvable"
         assert res["unreachable"] == ["z"]
         assert res["reason"]
+
+    def test_tie_cycle_canonical_ruling(self):
+        """零代价四点环：e06/e07 同价进 c，规范树取 e07。
+
+        记录必须公开全部选择依据，使每一步都能仅凭输入与记录复算：
+        c 的候选里 e06 与 e07 同价，但 e06 的规范优先标记为 1（非规范边），
+        规范裁决序列公开了 e06 被弃的原因（强制入选后与 e00/e01 成环不可行）。
+        """
+        points, root, channels = TIE_CYCLE
+        res = solve(points, root, channels)
+        assert res["status"] == "ok"
+        assert res["total_cost"] == 0
+        assert res["canonical_ids"] == ["e00", "e01", "e07"]
+        rec = res["record"]
+        assert rec["contractions"] == 0
+        assert len(rec["levels"]) == 1
+        level = rec["levels"][0]
+        assert level["rule"] == rec["key_scheme"]
+        # c 的全部候选公开：e07 规范优先、入选；e06 同价但非规范、落选
+        cands = {c["node"]: c["inlets"] for c in level["candidates"]}
+        c_in = {i["channel"]: i for i in cands["c"]}
+        assert set(c_in) == {"e06", "e07"}
+        assert c_in["e07"]["canonical"] is True and c_in["e07"]["selected"] is True
+        assert c_in["e06"]["canonical"] is False and c_in["e06"]["selected"] is False
+        assert c_in["e07"]["key"] < c_in["e06"]["key"]
+        # 选中通道恰为候选中比较键最小者
+        chosen = {c["node"]: c for c in level["chosen"]}
+        assert chosen["c"]["channel"] == "e07"
+        # 规范裁决：e06 强制入选后与已接受的 e00、e01 成环，不可行（None）
+        dec = {d["channel"]: d for d in rec["canonical_decisions"]}
+        assert dec["e06"]["accepted"] is False
+        assert dec["e06"]["min_cost_if_forced"] is None
+        assert dec["e06"]["forced_with"] == ["e00", "e01"]
+        assert dec["e07"]["accepted"] is True
+        assert dec["e07"]["min_cost_if_forced"] == 0
+        # 仅凭输入与公开记录即可重放出同一规范树
+        assert replay_record(points, root, channels, rec) == ["e00", "e01", "e07"]
+
+    def test_tie_cycle_record_tampering_detected(self):
+        """篡改公开记录（把 c 的选中改为 e06）必须被复算拒绝。"""
+        points, root, channels = TIE_CYCLE
+        res = solve(points, root, channels)
+        import copy
+
+        rec = copy.deepcopy(res["record"])
+        for c in rec["levels"][0]["chosen"]:
+            if c["node"] == "c":
+                c["channel"] = "e06"
+        with pytest.raises(AssertionError):
+            replay_record(points, root, channels, rec)
 
 
 class TestValidation:

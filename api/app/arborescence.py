@@ -5,17 +5,37 @@
 恰有一条入选通道且自根可达）。同优解中按"升序通道标识序列"取字典序
 最小者（规范树）。
 
-除规范树外，本模块还产出可复算的有向环收缩 / 展开记录：
-  * 每一层为每个非根点选出的最小入边；
-  * 每次有向环收缩（环节点、环边、超点编号、入边代价修正、被丢弃的环内边）；
-  * 每次展开替换（进入通道、进入点、被替换的环边、保留的环边）。
+除规范树外，本模块还产出仅凭输入与响应即可独立复算的公开决策记录。
+每一步选择都按记录中公开的比较规则重放：
+  * ``record["key_scheme"]`` 声明逐层选择的比较键
+    ``(本层修正代价, 规范优先标记, 通道标识)``：规范树通道标记为 0，
+    其余为 1；逐分量取字典序最小者。
+  * 每个层级 ``record["levels"][i]`` 公开：
+      - ``rule``：本层选择规则的文字说明；
+      - ``chosen``：各非根（超）点选中的通道；
+      - ``candidates``：各非根（超）点的**全部**候选入边及其本层比较键
+        （``adjusted_cost`` / ``canonical`` / ``key``），并标注 ``selected``。
+        审查者取键最小的候选即可逐步复算 ``chosen``，无需任何隐藏信息；
+      - 若本层出现有向环，另公开环收缩（环节点/环边、超点、入边代价
+        ``w − w*(v)`` 修正、引出边、丢弃的环内边）。
+  * ``record["canonical_decisions"]`` 按标识升序公开规范树的贪心强制裁决：
+    每条通道记录在"此前已接受通道 + 本条"被强制入选时可达到的最小总代价
+    （不可行为 null）、全局最优代价 C* 与 accepted 与否。这些代价只由
+    输入决定，任何人都可用自己的 Edmonds 实现独立核验；按序列重放即可
+    重建规范边集合，进而复算各候选的规范优先标记。
+  * ``record["expansions"]`` 公开每次展开替换（进入通道、进入点、
+    被替换环边、保留环边）。
+
+``replay_record()`` 只依据输入与公开记录：重放规范裁决、逐层核对候选键
+与选中通道、按收缩记录核对相邻层的边变换与代价修正、重放展开替换，
+逐步推出最终树并做结构校验。
 
 规范树的求得分两步：
   1. 用 Edmonds 求出最小总代价 C*；
   2. 按通道标识升序逐个尝试"强制入选"：若强制后仍存在代价为 C* 的
      汇流树，则强制之。可证明最终强制集本身就是字典序最小的最优树。
-最后用 (代价, 是否规范边, 标识) 作为字典序边键再跑一次 Edmonds，
-保证产出的收缩记录恰好对应规范树。
+最后用公开的 (代价, 规范优先标记, 标识) 比较键再跑一次 Edmonds，
+使产出的层级记录恰好对应规范树；该运行的全部候选键都随记录公开。
 """
 
 from __future__ import annotations
@@ -169,28 +189,57 @@ def _solve_level(
     levels: list[dict],
     expansions: list[dict],
     sup_counter: list[int],
+    key_scheme: str,
+    canon_ids: frozenset[str] = frozenset(),
 ) -> list[_Edge] | None:
     """在当前层级上求解；返回以本层 _Edge 表示的入选边，无解返回 None。
 
-    levels / expansions 收集可复算记录。
+    levels / expansions 收集可复算记录；每个非根（超）点的全部候选入边
+    及其本层比较键都写入记录，使选择可以仅凭公开信息逐步复算。
+    canon_ids 为规范树通道标识集，用于在记录中标注候选的规范优先标记。
     """
     in_edge: dict[str, _Edge] = {}
+    candidates: dict[str, list[_Edge]] = {}
     for n in sorted(nodes):
         if n == root:
             continue
-        best: _Edge | None = None
-        for e in edges:
-            if e.v == n and (best is None or e.key < best.key):
-                best = e
-        if best is None:
+        cands = [e for e in edges if e.v == n]
+        if not cands:
             return None  # 某点无入边：本层不可解
-        in_edge[n] = best
+        cands.sort(key=lambda e: e.key)
+        candidates[n] = cands
+        in_edge[n] = cands[0]
 
     level_rec = {
         "depth": depth,
+        "rule": key_scheme,
         "nodes": sorted(nodes),
         "chosen": [
-            {"node": n, "channel": in_edge[n].orig.id, "cost": in_edge[n].key[0]}
+            {
+                "node": n,
+                "channel": in_edge[n].orig.id,
+                "cost": in_edge[n].key[0],
+                "key": list(in_edge[n].key),
+            }
+            for n in sorted(nodes)
+            if n != root
+        ],
+        "candidates": [
+            {
+                "node": n,
+                "inlets": [
+                    {
+                        "channel": e.orig.id,
+                        "from": e.orig.u,
+                        "to": e.orig.v,
+                        "adjusted_cost": e.key[0],
+                        "canonical": e.orig.id in canon_ids,
+                        "key": list(e.key),
+                        "selected": e is in_edge[n],
+                    }
+                    for e in candidates[n]
+                ],
+            }
             for n in sorted(nodes)
             if n != root
         ],
@@ -259,7 +308,10 @@ def _solve_level(
     }
 
     new_nodes = [n for n in nodes if n not in cyc] + [sname]
-    sub = _solve_level(new_nodes, root, new_edges, depth + 1, levels, expansions, sup_counter)
+    sub = _solve_level(
+        new_nodes, root, new_edges, depth + 1, levels, expansions, sup_counter,
+        key_scheme, canon_ids,
+    )
     if sub is None:
         return None
 
@@ -288,12 +340,18 @@ def _solve_level(
 
 
 def _edmonds(
-    nodes: list[str], root: str, edges: list[_Edge]
+    nodes: list[str],
+    root: str,
+    edges: list[_Edge],
+    key_scheme: str = "按 (本层修正代价, 规范优先标记, 通道标识) 逐分量取最小",
+    canon_ids: frozenset[str] = frozenset(),
 ) -> tuple[list[_Edge], list[dict], list[dict]] | None:
     """完整 Edmonds 运行；返回 (入选边, 层级记录, 展开记录) 或 None。"""
     levels: list[dict] = []
     expansions: list[dict] = []
-    picked = _solve_level(list(nodes), root, edges, 0, levels, expansions, [0])
+    picked = _solve_level(
+        list(nodes), root, edges, 0, levels, expansions, [0], key_scheme, canon_ids
+    )
     if picked is None:
         return None
     return picked, levels, expansions
@@ -391,6 +449,10 @@ def reachable_from(root: str, channels: list[Channel]) -> set[str]:
     return seen
 
 
+# 逐层选择的公开比较规则（写入每层记录与 record.key_scheme）
+KEY_SCHEME = "按 (本层修正代价, 规范优先标记, 通道标识) 逐分量取最小；规范树通道标记为 0，其余为 1"
+
+
 def solve(points: list[str], root: str, channels: list[Channel]) -> dict:
     """求解并组装 API 结果。输入须已通过 validate_problem。"""
     reach = reachable_from(root, channels)
@@ -411,21 +473,36 @@ def solve(points: list[str], root: str, channels: list[Channel]) -> dict:
     assert run is not None, "全部可达但 Edmonds 无解，内部不一致"
     best_cost = sum(e.orig.cost for e in run[0])
 
-    # 2) 规范树：按标识升序贪心强制入选
+    # 2) 规范树：按标识升序贪心强制入选；每一步裁决连同其依据一起公开，
+    #    使规范边集合可以仅凭输入与记录独立重放、核验。
     forced: list[Channel] = []
+    canonical_decisions: list[dict] = []
     for c in sorted(channels, key=lambda x: x.id):
         trial_cost = _min_cost_with_forced(points, root, channels, forced + [c])
-        if trial_cost == best_cost:
+        accepted = trial_cost == best_cost
+        canonical_decisions.append(
+            {
+                "channel": c.id,
+                "forced_with": [f.id for f in forced],
+                "min_cost_if_forced": trial_cost,
+                "optimal_cost": best_cost,
+                "accepted": accepted,
+            }
+        )
+        if accepted:
             forced.append(c)
     canonical_ids = sorted(c.id for c in forced)
 
-    # 3) 以 (代价, 非规范边惩罚, 标识) 为键重跑，产出对应规范树的收缩记录
+    # 3) 以公开的 (代价, 规范优先标记, 标识) 比较键重跑，
+    #    产出恰好对应规范树的层级记录；全部候选键随记录公开。
     canon = set(canonical_ids)
     keyed_edges = [
         _Edge(c, c.u, c.v, (c.cost, 0 if c.id in canon else 1, c.id), enters=c.v, lower=None)
         for c in channels
     ]
-    final_run = _edmonds(list(points), root, keyed_edges)
+    final_run = _edmonds(
+        list(points), root, keyed_edges, key_scheme=KEY_SCHEME, canon_ids=frozenset(canon)
+    )
     assert final_run is not None
     picked, levels, expansions = final_run
     final_ids = sorted(e.orig.id for e in picked)
@@ -442,8 +519,10 @@ def solve(points: list[str], root: str, channels: list[Channel]) -> dict:
         "tree": tree,
         "canonical_ids": final_ids,
         "record": {
+            "key_scheme": KEY_SCHEME,
             "levels": levels,
             "expansions": expansions,
+            "canonical_decisions": canonical_decisions,
             "contractions": sum(1 for lv in levels if lv["cycle"]),
         },
     }
@@ -457,51 +536,280 @@ def solve(points: list[str], root: str, channels: list[Channel]) -> dict:
 def replay_record(
     points: list[str], root: str, channels: list[Channel], record: dict
 ) -> list[str]:
-    """根据收缩 / 展开记录复算最终入选通道标识（升序）。
+    """仅凭输入与公开记录复算最终入选通道标识（升序）。
 
-    复算规则：叶子层（无环层）的入选通道 ∪ 每次展开保留的环边。
-    同时校验记录内部一致性：每次展开的进入通道须已在当前选中集内、
-    被替换的环边须属于对应环、最终每非根点恰有一条入边且自根可达。
+    复算与校验分五步，全部只依赖输入和记录本身，任何一步不符即抛
+    AssertionError：
+      1. 重放规范裁决：逐条核对 ``canonical_decisions`` —— 标识升序、
+         ``forced_with`` 恰为此前已接受通道、``accepted`` 与
+         ``min_cost_if_forced == optimal_cost`` 一致 —— 重建规范边集；
+      2. 逐层核对选择：每层每个非根（超）点的选中通道须为该点全部候选中
+         比较键最小者，候选键须自洽（``key == (修正代价, 规范标记, 标识)``），
+         规范标记须与第 1 步重建的规范边集一致；
+      3. 核对层间变换：第 0 层候选须与输入通道一一对应；更深层的候选
+         须能由上一层的收缩记录（环、入边代价修正、引出边、丢弃边）推出；
+      4. 重放展开替换：叶子层选中通道 ∪ 各次展开保留的环边；
+      5. 结构校验：最终选中集每非根点恰一条入边、自根可达，
+         且与第 1 步重建的规范边集一致。
     """
     levels: list[dict] = record["levels"]
     expansions: list[dict] = record["expansions"]
+    decisions: list[dict] = record["canonical_decisions"]
+    key_scheme: str = record["key_scheme"]
     if not levels:
         raise AssertionError("记录缺少层级信息")
+    if record["contractions"] != sum(1 for lv in levels if lv["cycle"]):
+        raise AssertionError("contractions 与层级记录中的环数量不符")
+
+    by_id = {c.id: c for c in channels}
+
+    # ---- 1. 重放规范裁决，重建规范边集 ----
+    accepted: list[str] = []
+    optimum: int | None = None
+    prev_id: str | None = None
+    for d in decisions:
+        cid = d["channel"]
+        if cid not in by_id:
+            raise AssertionError(f"规范裁决引用了未知通道 {cid}")
+        if prev_id is not None and cid <= prev_id:
+            raise AssertionError("规范裁决未按通道标识升序给出")
+        prev_id = cid
+        if d["forced_with"] != accepted:
+            raise AssertionError(f"裁决 {cid} 的已接受前缀与裁决序列重放不一致")
+        if optimum is None:
+            optimum = d["optimal_cost"]
+        elif d["optimal_cost"] != optimum:
+            raise AssertionError("各裁决记录的全局最优代价不一致")
+        want = d["min_cost_if_forced"] == optimum
+        if d["accepted"] != want:
+            raise AssertionError(f"裁决 {cid} 的 accepted 与其公开的代价依据不符")
+        if want:
+            accepted.append(cid)
+    if optimum is None:
+        raise AssertionError("记录缺少规范裁决")
+    canon = set(accepted)
+
+    # ---- 2/3. 逐层核对选择与层间变换 ----
+    cycles_by_super: dict[str, dict] = {}
+    # rep[p]：原始点 p 在当前层级的代表（未收缩即自身；所在环收缩后为超点）
+    rep: dict[str, str] = {p: p for p in points}
+    prev_rep: dict[str, str] = {}
+    prev_level: dict | None = None
+    prev_inlet: dict[str, tuple[str, dict]] = {}
+    prev_chosen: dict[str, dict] = {}
+    for depth, lv in enumerate(levels):
+        if lv["depth"] != depth:
+            raise AssertionError("层级深度不连续")
+        if lv["rule"] != key_scheme:
+            raise AssertionError(f"第 {depth} 层选择规则与 key_scheme 不符")
+        nonroot = sorted(n for n in lv["nodes"] if n != root)
+        cand = {c["node"]: c["inlets"] for c in lv["candidates"]}
+        chosen = {c["node"]: c for c in lv["chosen"]}
+        if sorted(cand) != nonroot or sorted(chosen) != nonroot:
+            raise AssertionError(f"第 {depth} 层的候选/选中记录与节点集不符")
+
+        inlet_by_id: dict[str, tuple[str, dict]] = {}
+        for n in nonroot:
+            inlets = cand[n]
+            if not inlets:
+                raise AssertionError(f"第 {depth} 层点 {n} 没有任何候选入边")
+            for inl in inlets:
+                cid = inl["channel"]
+                if cid not in by_id:
+                    raise AssertionError(f"第 {depth} 层候选 {cid} 不在输入中")
+                c0 = by_id[cid]
+                if inl["from"] != c0.u or inl["to"] != c0.v:
+                    raise AssertionError(f"第 {depth} 层候选 {cid} 的端点与输入不符")
+                if rep[c0.v] != n:
+                    raise AssertionError(
+                        f"第 {depth} 层候选 {cid} 进入的当前节点应为 {rep[c0.v]}"
+                    )
+                key = inl["key"]
+                if len(key) != 3 or key[0] != inl["adjusted_cost"] or key[2] != cid:
+                    raise AssertionError(f"第 {depth} 层候选 {cid} 的比较键不自洽")
+                if inl["canonical"] != (cid in canon):
+                    raise AssertionError(
+                        f"第 {depth} 层候选 {cid} 的规范标记与裁决重放结果不符"
+                    )
+                inlet_by_id[cid] = (n, inl)
+            best = min(inlets, key=lambda x: x["key"])
+            ch = chosen[n]
+            if ch["channel"] != best["channel"]:
+                raise AssertionError(
+                    f"第 {depth} 层点 {n} 选中了 {ch['channel']}，"
+                    f"但候选中比较键最小的是 {best['channel']}"
+                )
+            if ch["key"] != best["key"] or ch["cost"] != best["adjusted_cost"]:
+                raise AssertionError(f"第 {depth} 层点 {n} 的选中记录与候选键不符")
+            if [inl["selected"] for inl in inlets].count(True) != 1 or not best["selected"]:
+                raise AssertionError(f"第 {depth} 层点 {n} 的 selected 标注与选中记录不符")
+
+        if depth == 0:
+            if lv["nodes"] != sorted(points):
+                raise AssertionError("第 0 层节点集与输入点集不符")
+            for n in nonroot:
+                want = sorted(c.id for c in channels if c.v == n)
+                got = sorted(inl["channel"] for inl in cand[n])
+                if got != want:
+                    raise AssertionError(f"第 0 层点 {n} 的候选与输入通道不一一对应")
+                for inl in cand[n]:
+                    c0 = by_id[inl["channel"]]
+                    if inl["adjusted_cost"] != c0.cost:
+                        raise AssertionError(f"第 0 层候选 {inl['channel']} 的修正代价应为原始代价")
+                    if inl["key"] != [c0.cost, 0 if inl["canonical"] else 1, c0.id]:
+                        raise AssertionError(
+                            f"第 0 层候选 {inl['channel']} 的比较键与公开规则不符"
+                        )
+        else:
+            assert prev_level is not None
+            cyc = prev_level["cycle"]
+            if cyc is None:
+                raise AssertionError("上一层没有环收缩，不应存在更深层级")
+            sup = cyc["supernode"]
+            cyc_nodes = set(cyc["nodes"])
+            want_nodes = sorted((set(prev_level["nodes"]) - cyc_nodes) | {sup})
+            if lv["nodes"] != want_nodes:
+                raise AssertionError(f"第 {depth} 层节点集与上一层收缩结果不符")
+            internal = set(cyc["channels"]) | set(cyc["dropped_internal"])
+            rewired_in = {r["channel"]: r for r in cyc["rewired_in"]}
+            rewired_out = {r["channel"] for r in cyc["rewired_out"]}
+            for n in nonroot:
+                for inl in cand[n]:
+                    cid = inl["channel"]
+                    if cid in internal:
+                        raise AssertionError(f"环内边 {cid} 出现在收缩后的层级")
+                    prev_entry = prev_inlet.get(cid)
+                    if prev_entry is None:
+                        raise AssertionError(f"第 {depth} 层候选 {cid} 在上一层不存在")
+                    pn, pinl = prev_entry
+                    if n == sup:
+                        r = rewired_in.get(cid)
+                        if r is None or pn != r["enters"]:
+                            raise AssertionError(
+                                f"进入超点 {sup} 的候选 {cid} 缺少对应的入边修正记录"
+                            )
+                        base = prev_chosen[r["enters"]]
+                        if inl["adjusted_cost"] != pinl["adjusted_cost"] - base["cost"]:
+                            raise AssertionError(f"候选 {cid} 的修正代价与收缩记录不符")
+                        if inl["key"][1] != pinl["key"][1] - base["key"][1]:
+                            raise AssertionError(f"候选 {cid} 的修正规范标记与收缩记录不符")
+                    else:
+                        if pn != n or pinl["key"] != inl["key"]:
+                            raise AssertionError(
+                                f"未受收缩影响的候选 {cid} 在层间被改动"
+                            )
+                        if prev_rep[by_id[cid].u] in cyc_nodes and cid not in rewired_out:
+                            raise AssertionError(f"引出边 {cid} 缺少 rewired_out 记录")
+            for cid, (pn, _pinl) in prev_inlet.items():
+                if cid not in internal and cid not in inlet_by_id:
+                    raise AssertionError(f"上一层候选 {cid} 在收缩后丢失")
+
+        cyc = lv["cycle"]
+        if cyc is not None:
+            nodes_fwd, chans = cyc["nodes"], cyc["channels"]
+            k = len(nodes_fwd)
+            if k < 2 or len(chans) != k:
+                raise AssertionError(f"第 {depth} 层环记录不完整")
+            if cyc["supernode"] in set(points) or cyc["supernode"] in by_id:
+                raise AssertionError("超点标识与输入冲突")
+            cyc_nodes = set(nodes_fwd)
+            for i, nid in enumerate(nodes_fwd):
+                if nid not in chosen:
+                    raise AssertionError("环节点不是本层非根点")
+                edge = by_id.get(chans[i])
+                if edge is None:
+                    raise AssertionError(f"环边 {chans[i]} 不在输入中")
+                if rep[edge.u] != nid or rep[edge.v] != nodes_fwd[(i + 1) % k]:
+                    raise AssertionError("环边方向与环节点序列不符")
+                if chosen[nodes_fwd[(i + 1) % k]]["channel"] != chans[i]:
+                    raise AssertionError("环边须为本层对应点的选中入边")
+            for cid in cyc["dropped_internal"]:
+                c0 = by_id.get(cid)
+                if c0 is None or rep[c0.u] not in cyc_nodes or rep[c0.v] not in cyc_nodes:
+                    raise AssertionError(f"丢弃的环内边 {cid} 与环节点不符")
+                if cid in chans:
+                    raise AssertionError(f"{cid} 既是环边又被丢弃")
+            for r in cyc["rewired_in"]:
+                cid = r["channel"]
+                c0 = by_id.get(cid)
+                if c0 is None or r["from"] != c0.u or r["to"] != c0.v:
+                    raise AssertionError(f"入边修正记录 {cid} 与输入不符")
+                if (
+                    rep[c0.v] != r["enters"]
+                    or r["enters"] not in cyc_nodes
+                    or rep[c0.u] in cyc_nodes
+                ):
+                    raise AssertionError(f"入边修正记录 {cid} 的进入点与环不符")
+                pn, pinl = inlet_by_id[cid]
+                base = chosen[r["enters"]]
+                if r["adjusted_cost"] != pinl["adjusted_cost"] - base["cost"]:
+                    raise AssertionError(f"入边 {cid} 的代价修正与 w − w*(v) 规则不符")
+                if r["original_cost"] != c0.cost:
+                    raise AssertionError(f"入边 {cid} 的原始代价与输入不符")
+            for r in cyc["rewired_out"]:
+                c0 = by_id.get(r["channel"])
+                if c0 is None or rep[c0.u] not in cyc_nodes or rep[c0.v] in cyc_nodes:
+                    raise AssertionError(f"引出边记录 {r['channel']} 与环节点不符")
+                if c0.v == root:
+                    # 指向根的边不是任何点的候选，但其键在各层保持不变
+                    if r["cost"] != c0.cost:
+                        raise AssertionError(f"引出边 {r['channel']} 的代价与输入不符")
+                elif r["cost"] != inlet_by_id[r["channel"]][1]["adjusted_cost"]:
+                    raise AssertionError(f"引出边 {r['channel']} 的代价与本层记录不符")
+            # 完备性：环节点的候选要么是环边/环内丢弃边，要么记入 rewired_in
+            rin = {r["channel"] for r in cyc["rewired_in"]}
+            for nid in nodes_fwd:
+                for inl in cand[nid]:
+                    cid = inl["channel"]
+                    if cid not in chans and cid not in cyc["dropped_internal"] and cid not in rin:
+                        raise AssertionError(f"进入环的候选 {cid} 缺少修正记录")
+            cycles_by_super[cyc["supernode"]] = cyc
+            # 环节点（含此前收缩出的超点）在当前层之后由超点代表
+            prev_rep = dict(rep)
+            for p in points:
+                if rep[p] in cyc_nodes:
+                    rep[p] = cyc["supernode"]
+
+        prev_level = lv
+        prev_inlet = inlet_by_id
+        prev_chosen = chosen
+
     leaf = levels[-1]
     if leaf["cycle"] is not None:
         raise AssertionError("最深层仍含环，记录不完整")
+
+    # ---- 4. 重放展开替换 ----
     selected: set[str] = {c["channel"] for c in leaf["chosen"]}
-
-    cycles_by_super: dict[str, dict] = {}
-    for lv in levels:
-        if lv["cycle"]:
-            cyc = lv["cycle"]
-            cycles_by_super[cyc["supernode"]] = cyc
-
+    expanded: set[str] = set()
     for exp in expansions:
-        if exp["supernode"] not in cycles_by_super:
-            raise AssertionError(f"展开记录引用了未知超点 {exp['supernode']}")
-        cyc = cycles_by_super[exp["supernode"]]
+        sup = exp["supernode"]
+        if sup not in cycles_by_super:
+            raise AssertionError(f"展开记录引用了未知超点 {sup}")
+        if sup in expanded:
+            raise AssertionError(f"超点 {sup} 被重复展开")
+        expanded.add(sup)
+        cyc = cycles_by_super[sup]
         if exp["entering_channel"] not in selected:
             raise AssertionError(
-                f"展开 {exp['supernode']} 的进入通道 {exp['entering_channel']} 不在当前选中集"
+                f"展开 {sup} 的进入通道 {exp['entering_channel']} 不在当前选中集"
             )
         if exp["removed_cycle_channel"] not in cyc["channels"]:
-            raise AssertionError(
-                f"展开 {exp['supernode']} 移除的 {exp['removed_cycle_channel']} 不属于该环"
-            )
+            raise AssertionError(f"展开 {sup} 移除的 {exp['removed_cycle_channel']} 不属于该环")
         for kept in exp["kept_cycle_channels"]:
             if kept not in cyc["channels"]:
-                raise AssertionError(
-                    f"展开 {exp['supernode']} 保留的 {kept} 不属于该环"
-                )
+                raise AssertionError(f"展开 {sup} 保留的 {kept} 不属于该环")
             selected.add(kept)
+        if {exp["removed_cycle_channel"]} | set(exp["kept_cycle_channels"]) != set(
+            cyc["channels"]
+        ):
+            raise AssertionError(f"展开 {sup} 的替换/保留未恰好覆盖全部环边")
+    if expanded != set(cycles_by_super):
+        raise AssertionError("存在未展开的收缩环")
 
-    by_id = {c.id: c for c in channels}
+    # ---- 5. 结构校验与规范边集一致性 ----
     for cid in selected:
         if cid not in by_id:
             raise AssertionError(f"选中通道 {cid} 不在输入中")
-    # 结构校验：每非根点恰一条入边、无环、自根可达
     indeg: dict[str, int] = {}
     for cid in selected:
         indeg[by_id[cid].v] = indeg.get(by_id[cid].v, 0) + 1
@@ -512,4 +820,6 @@ def replay_record(
     sub_channels = [by_id[cid] for cid in selected]
     if reachable_from(root, sub_channels) != set(points):
         raise AssertionError("复算结果不能自根到达全部点")
+    if selected != canon:
+        raise AssertionError("复算得到的树与规范裁决重建的规范边集不一致")
     return sorted(selected)
